@@ -645,6 +645,7 @@ def test_model(model, test_loader, device=DEVICE):
         for X, Y in test_loader:
             X, Y = X.to(device), Y.to(device)
             preds = model(X)
+            preds = torch.clamp(preds, 0, 24) #sustainability duration limits
             test_loss += criterion(preds, Y).item()
     test_loss /= len(test_loader)
     print(f"Test MAE: {test_loss:.5f}")
@@ -653,19 +654,19 @@ def test_model(model, test_loader, device=DEVICE):
 def main():
     train_loader, val_loader, test_loader, means, stds = get_data()
     model = FlexibilityCNN()
-    model = train_model(
-        model,
-        train_loader,
-        val_loader,
-        epochs=EPOCHS,
-        lr=LR,
-        wd=WEIGHT_DECAY,
-        device=DEVICE,
-        patience=PATIENCE,
-        save_path="best_flex_cnn.pt",
-    )
+    # model = train_model(
+    #     model,
+    #     train_loader,
+    #     val_loader,
+    #     epochs=EPOCHS,
+    #     lr=LR,
+    #     wd=WEIGHT_DECAY,
+    #     device=DEVICE,
+    #     patience=PATIENCE,
+    #     save_path="best_flex_cnn.pt",
+    # )
     #or: load a pre-trained model
-    #model.load_state_dict(torch.load("best_flex_cnn.pt", map_location=DEVICE))
+    model.load_state_dict(torch.load("best_flex_cnn.pt", map_location=DEVICE))
     test_model(model, test_loader, device=DEVICE)
 
     # plot_results_for_day(
@@ -687,6 +688,7 @@ def main():
         sample_idx = 0  # global counter across all batches
         for batch_idx, (X_batch, Y_batch) in enumerate(test_loader): #iterates over ebery batch in the test set
             preds = model(X_batch.to(DEVICE))  # (B,1,51,96)
+            preds = torch.clamp(preds, 0, 24)  #sustainability duration limits
 
             for j in range(X_batch.size(0)):  # loop over batch samples
                 X_sample = X_batch[j]
