@@ -516,7 +516,7 @@ class FlexibilityCNN(nn.Module):
         x = x.view(x.size(0), 256, 3, 4)    # (B,256,3,4)
         x = self.decoder(x)                 # (B,1,~52,96)
         x = F.interpolate(x, size=(51, 96), mode='bilinear', align_corners=False) #final interpolation step to (51,96)
-        #x = torch.clamp(x, 0, 24) #sustainability duration limits
+        #    x = torch.clamp(x, 0, 24) #sustainability duration limits
         return x
 
 
