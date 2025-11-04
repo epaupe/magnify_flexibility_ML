@@ -8,9 +8,12 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader, random_split
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import re
-import random
-
+import time
+from sklearn.metrics import r2_score
+from torch.utils.tensorboard import SummaryWriter
+#to activate tensorboard logging during training, run the following command in a terminal, in the same directory as this script, and with the correct virtual environment activated:
+# tensorboard --logdir runs
+#then open the provided URL in a web browser
 
 # =====================================================
 # CONFIGURATION
@@ -24,11 +27,11 @@ FLEX_ENV_DIR = os.path.join(BASE_DIR, "data/flex_env")
 CLIMATE_DIR = os.path.join(BASE_DIR, "input_features/climate_scenarios")
 
 BATCH_SIZE   = 16
-EPOCHS       = 10
+EPOCHS       = 50
 LR           = 1e-3
 WEIGHT_DECAY = 1e-4
 SEED         = 42
-PATIENCE     = 10
+PATIENCE     = 20
 DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 
 torch.manual_seed(SEED)
@@ -112,107 +115,6 @@ def load_flexibility_envelope(building_num, climate_id, year, month, day):
         return None
     return arr  # (51, 96)
 
-def plot_weather_and_envelopes_2(
-    pred,
-    truth,
-    input_features,
-    means,
-    stds,
-    title="Flexibility Envelope Prediction",
-    save_dir=None,
-    file_name=None,
-    show=False,
-):
-    """
-    Plots:
-      48h weather inputs (de-normalized ambient temperature + irradiance)
-      Ground truth flexibility envelope
-      Predicted flexibility envelope
-
-    The time axis is reconstructed directly from sin/cos encodings
-    as a continuous 0–48 h window (no need for climate file paths).
-    """
-
-    # --------------------------------------
-    # Convert tensors → numpy
-    # --------------------------------------
-    pred = pred.squeeze().detach().cpu().numpy()   # (51,96)
-    truth = truth.squeeze().detach().cpu().numpy() # (51,96)
-    features = input_features.detach().cpu().numpy()  # (4,192)
-    means = means.squeeze().cpu().numpy()
-    stds = stds.squeeze().cpu().numpy()
-
-    mae = np.mean(np.abs(pred - truth))
-    mae_minutes = mae * 60.0  # convert hours → minutes
-    # --------------------------------------
-    # De-normalize T_amb and irrad
-    # --------------------------------------
-    T_amb = features[2, :] * stds[2] + means[2]
-    irrad = features[3, :] * stds[3] + means[3]
-
-    # Build continuous 48h timeline (each step = 15 min)
-    time_hours = np.arange(0, 48, 0.25)
-
-    # --------------------------------------
-    # Create figure
-    # --------------------------------------
-    fig, axs = plt.subplots(1, 3, figsize=(16, 4),
-                            gridspec_kw={'width_ratios': [1.5, 1, 1]})
-    fig.suptitle(f"{title}\nMAE = {mae:.3f} h  ({mae_minutes:.1f} min)",
-                 fontsize=14, fontweight="bold")
-
-    # 1 WEATHER INPUTS
-    ax = axs[0]
-    ax2 = ax.twinx()
-
-    ax.plot(time_hours, T_amb, color="tab:red", linewidth=2, label="Ambient Temp [°C]")
-    ax2.plot(time_hours, irrad, color="tab:blue", linewidth=2, alpha=0.7, label="Irradiance [W/m²]")
-
-    ax.set_xlabel("Time [hours]")
-    ax.set_xlim(0, 48)
-    ax.set_xticks(np.arange(0, 49, 6))
-    ax.set_ylabel("Temperature [°C]", color="tab:red")
-    ax2.set_ylabel("Irradiance [W/m²]", color="tab:blue")
-
-    # Day separation line (optional)
-    ax.axvline(24, color="gray", linestyle="--", alpha=0.5)
-    ax.text(12, ax.get_ylim()[1]*0.9, "Day 1", ha="center", color="gray", fontsize=9)
-    ax.text(36, ax.get_ylim()[1]*0.9, "Day 2", ha="center", color="gray", fontsize=9)
-
-    lines, labels = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines + lines2, labels + labels2, loc="upper left", fontsize=9)
-    ax.set_title("Input Weather (48 h)")
-
-    # 2 GROUND TRUTH ENVELOPE
-    im1 = axs[1].imshow(truth, aspect="auto", origin="lower",
-                        cmap="viridis")
-    axs[1].set_title("Ground Truth Envelope")
-    axs[1].set_xlabel("Lead time (96)")
-    axs[1].set_ylabel("Power levels (51)")
-    cbar1 = fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
-    cbar1.set_label("Sustained Duration [h]")
-
-    # 3 PREDICTED ENVELOPE
-    im2 = axs[2].imshow(pred, aspect="auto", origin="lower",
-                        cmap="viridis",vmin=np.min(truth), vmax=np.max(truth))
-    axs[2].set_title("Predicted Envelope")
-    axs[2].set_xlabel("Lead time (96)")
-    axs[2].set_ylabel("Power levels (51)")
-    cbar2 = fig.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
-    cbar2.set_label("Sustained Duration [h]")
-
-    plt.tight_layout()
-
-    if save_dir is not None and file_name is not None:
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, file_name)
-        plt.savefig(save_path, dpi=200, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved: {save_path} | MAE = {mae_minutes:.1f} min")
-    elif show:
-        plt.show()
-
 def plot_weather_and_envelopes(
     pred,
     truth,
@@ -267,7 +169,7 @@ def plot_weather_and_envelopes(
     fig.suptitle(f"{title}\nMAE = {mae:.3f} h  ({mae_minutes:.1f} min)",
                  fontsize=14, fontweight="bold")
 
-    # 1️⃣ WEATHER INPUTS
+    # 1 WEATHER INPUTS
     ax = axs[0]
     ax2 = ax.twinx()
     ax.plot(time_hours, T_amb, color="tab:red", linewidth=2, label="Ambient Temp [°C]")
@@ -285,7 +187,7 @@ def plot_weather_and_envelopes(
     ax.legend(lines + lines2, labels + labels2, loc="upper left", fontsize=9)
     ax.set_title("Input Weather (48 h)")
 
-    # 2️⃣ GROUND TRUTH ENVELOPE
+    # 2 GROUND TRUTH ENVELOPE
     im1 = axs[1].imshow(truth, aspect="auto", origin="lower",
                         cmap="viridis")
     axs[1].set_title("Ground Truth Envelope")
@@ -294,7 +196,7 @@ def plot_weather_and_envelopes(
     cbar1 = fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
     cbar1.set_label("Sustained Duration [h]")
 
-    # 3️⃣ PREDICTED ENVELOPE
+    # 3 PREDICTED ENVELOPE
     im2 = axs[2].imshow(pred, aspect="auto", origin="lower",
                         cmap="viridis", vmin=np.min(truth), vmax=np.max(truth))
     axs[2].set_title("Predicted Envelope")
@@ -303,7 +205,7 @@ def plot_weather_and_envelopes(
     cbar2 = fig.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
     cbar2.set_label("Sustained Duration [h]")
 
-    # 4️⃣ SIGNED ERROR MAP (pred - true)
+    # 4 SIGNED ERROR MAP (pred - true)
     im3 = axs[3].imshow(error_map, aspect="auto", origin="lower",
                         cmap="bwr", vmin=-24, vmax=24)
     axs[3].set_title("Error Map [h]\n(pred − true)")
@@ -323,92 +225,6 @@ def plot_weather_and_envelopes(
         print(f"Saved: {save_path} | MAE = {mae_minutes:.1f} min")
     elif show:
         plt.show()
-
-
-def plot_results_for_day(model, building_num, climate_id, year, month, day, base_dir=BASE_DIR):
-    """
-    For a given (climate_id, year, month, day):
-      1. Loads raw 48h climate data + timestamps
-      2. Loads matching ground-truth flexibility envelope
-      3. Predicts the envelope using the trained model
-      4. Plots weather, ground-truth, and predicted envelopes side-by-side
-    """
-    # -----------------------
-    # Load raw climate + features
-    # -----------------------
-    features, df_raw = load_climate_data(climate_id, year, month, day)
-    if df_raw is None:
-        print("Could not load climate data.")
-        return
-
-    # Get timestamps & raw values
-    time_stamps = df_raw["time"]
-    T_amb = df_raw["T_amb"].to_numpy()
-    irrad = df_raw["irrad"].to_numpy()
-
-    # -----------------------
-    # Load ground-truth envelope
-    # -----------------------
-    Y_true = load_flexibility_envelope(building_num, climate_id, year, month, day)
-    if Y_true is None:
-        print("Could not load ground-truth envelope.")
-        return
-    Y_true = torch.tensor(Y_true).unsqueeze(0).unsqueeze(0)  # (1,1,51,96)
-
-    # -----------------------
-    # Model prediction
-    # -----------------------
-    model.eval()
-    X_input = torch.tensor(features).unsqueeze(0).to(DEVICE)  # (1,4,192)
-    with torch.no_grad():
-        Y_pred = model(X_input).cpu().squeeze(0).squeeze(0).numpy()  # (51,96)
-
-    # -----------------------
-    # Plot
-    # -----------------------
-    fig, axs = plt.subplots(1, 3, figsize=(16, 4), gridspec_kw={'width_ratios':[1.5,1,1]})
-    fig.suptitle(f"Flexibility Envelope for {year}-{month:02d}-{day:02d} | Climate {climate_id}", fontsize=14, fontweight='bold')
-
-    # === WEATHER INPUTS ===
-    ax1 = axs[0]
-    ax2 = ax1.twinx()
-
-    ax1.plot(time_stamps, T_amb, color='tab:red', linewidth=2, label='Ambient Temp [°C]')
-    ax2.plot(time_stamps, irrad, color='tab:blue', linewidth=2, alpha=0.7, label='Irradiance [W/m²]')
-
-    ax1.set_xlabel("Time (48 h)")
-    ax1.set_ylabel("Temperature [°C]", color="tab:red")
-    ax2.set_ylabel("Irradiance [W/m²]", color="tab:blue")
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %Hh"))
-    fig.autofmt_xdate(rotation=30)
-
-    lines, labels = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines + lines2, labels + labels2, loc="upper left", fontsize=9)
-    ax1.set_title("Input Weather (48 h)")
-
-    # === ENVELOPES ===
-    vmin = min(np.min(Y_true.numpy()), np.min(Y_pred))
-    vmax = max(np.max(Y_true.numpy()), np.max(Y_pred))
-
-    im1 = axs[1].imshow(Y_true.squeeze(0).squeeze(0).numpy(), aspect='auto', origin='lower',
-                        cmap='viridis', vmin=vmin, vmax=vmax)
-    axs[1].set_title("Ground Truth Envelope")
-    axs[1].set_xlabel("Lead time (96)")
-    axs[1].set_ylabel("Power levels (51)")
-    cbar1 = fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
-    cbar1.set_label("Sustained Duration [h]")
-
-    im2 = axs[2].imshow(Y_pred, aspect='auto', origin='lower',
-                        cmap='viridis', vmin=vmin, vmax=vmax)
-    axs[2].set_title("Predicted Envelope")
-    axs[2].set_xlabel("Lead time (96)")
-    axs[2].set_ylabel("Power levels (51)")
-    cbar2 = fig.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
-    cbar2.set_label("Sustained Duration [h]")
-
-    plt.tight_layout()
-    plt.show()
 
 
 # =====================================================
@@ -562,7 +378,7 @@ def train_model_no_early_stopping(model, train_loader, val_loader, epochs=EPOCHS
     return model
 
 
-def train_model(
+def train_model_no_tensorboard(
     model,
     train_loader,
     val_loader,
@@ -636,52 +452,200 @@ def train_model(
     model.load_state_dict(torch.load(save_path))
     return model
 
-def test_model(model, test_loader, device=DEVICE):
-    """Evaluate trained model on test set."""
+def train_model(
+    model,
+    train_loader,
+    val_loader,
+    epochs=EPOCHS,
+    lr=LR,
+    wd=WEIGHT_DECAY,
+    device=DEVICE,
+    patience=PATIENCE,
+    save_path="best_model.pt",
+):
+    """
+    Train the CNN with validation monitoring, early stopping,
+    checkpoint saving, and TensorBoard logging (MAE + R²).
+    """
+
+    from torch.utils.tensorboard import SummaryWriter
+    writer = SummaryWriter(log_dir="runs/flexibility_cnn")
+
+    model = model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    criterion = nn.L1Loss()  # MAE loss
+
+    best_val_loss = float("inf")
+    patience_counter = 0
+
+    for ep in range(1, epochs + 1):
+        # ---- TRAIN ----
+        model.train()
+        train_loss = 0.0
+        all_y_true_train, all_y_pred_train = [], []
+
+        for X, Y in train_loader:
+            X, Y = X.to(device), Y.to(device)
+            optimizer.zero_grad()
+            preds = model(X)
+            loss = criterion(preds, Y)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+
+            # collect predictions for R²
+            all_y_true_train.append(Y.detach().cpu().numpy().flatten())
+            all_y_pred_train.append(preds.detach().cpu().numpy().flatten())
+
+        train_loss /= len(train_loader)
+        y_true_train = np.concatenate(all_y_true_train)
+        y_pred_train = np.concatenate(all_y_pred_train)
+        r2_train = r2_score(y_true_train, y_pred_train)
+
+        # ---- VALIDATION ----
+        model.eval()
+        val_loss = 0.0
+        all_y_true_val, all_y_pred_val = [], []
+
+        with torch.no_grad():
+            for X, Y in val_loader:
+                X, Y = X.to(device), Y.to(device)
+                preds = model(X)
+                val_loss += criterion(preds, Y).item()
+
+                all_y_true_val.append(Y.detach().cpu().numpy().flatten())
+                all_y_pred_val.append(preds.detach().cpu().numpy().flatten())
+
+        val_loss /= len(val_loader)
+        y_true_val = np.concatenate(all_y_true_val)
+        y_pred_val = np.concatenate(all_y_pred_val)
+        r2_val = r2_score(y_true_val, y_pred_val)
+
+        # ---- LOG TO TENSORBOARD ----
+        writer.add_scalar("MAE/Train", train_loss, ep)
+        writer.add_scalar("MAE/Validation", val_loss, ep)
+        writer.add_scalar("R2/Train", r2_train, ep)
+        writer.add_scalar("R2/Validation", r2_val, ep)
+
+        # ---- EARLY STOPPING ----
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), save_path)
+            status = "Saved best model"
+        else:
+            patience_counter += 1
+            status = f"No improvement ({patience_counter}/{patience})"
+
+        writer.add_text("Status", f"Epoch {ep}: {status}")
+        print(f"Epoch {ep:03d} | Train MAE: {train_loss:.4f} | Val MAE: {val_loss:.4f} | R² Train: {r2_train:.4f} | R² Val: {r2_val:.4f} | {status}")
+
+        if patience_counter >= patience:
+            print(f"Early stopping after {ep} epochs (no improvement for {patience} epochs).")
+            break
+
+    writer.close()
+    print(f"Best validation MAE: {best_val_loss:.4f} (model saved at '{save_path}')")
+    model.load_state_dict(torch.load(save_path))
+    return model
+
+
+def test_model(model, test_loader, device=DEVICE, results_dir=None):
+    """
+    Evaluate trained model on test set:
+      - Mean Absolute Error (MAE)
+      - R² coefficient
+      - Average computation time per flexibility envelope (s/envelope)
+    Also logs metrics to TensorBoard and optionally saves them as .txt file.
+    """
     model.eval()
     criterion = nn.L1Loss()
+
     test_loss = 0.0
+    all_y_true, all_y_pred = [], []
+    total_time = 0.0
+    n_samples = 0
+
     with torch.no_grad():
         for X, Y in test_loader:
             X, Y = X.to(device), Y.to(device)
+
+            start_time = time.time()
             preds = model(X)
-            preds = torch.clamp(preds, 0, 24) #sustainability duration limits
+            preds = torch.clamp(preds, 0, 24)
+            end_time = time.time()
+
+            batch_time = end_time - start_time
+            total_time += batch_time
+            n_samples += X.size(0)
+
             test_loss += criterion(preds, Y).item()
+
+            all_y_true.append(Y.detach().cpu().numpy().flatten())
+            all_y_pred.append(preds.detach().cpu().numpy().flatten())
+
+    # Average MAE over all batches
     test_loss /= len(test_loader)
-    print(f"Test MAE: {test_loss:.5f}")
-    return test_loss
+
+    # Concatenate all predictions/targets for R²
+    y_true = np.concatenate(all_y_true)
+    y_pred = np.concatenate(all_y_pred)
+    r2 = r2_score(y_true, y_pred)
+
+    # Average computation time per envelope (s)
+    avg_time_per_sample = total_time / n_samples if n_samples > 0 else 0.0
+
+    print(f"Test MAE: {test_loss:.5f} h")
+    print(f"Test MAE: {test_loss * 60.0:.2f} minutes")
+    print(f"Test R²:  {r2:.5f}")
+    print(f"Average computation time: {avg_time_per_sample:.5f} s/envelope")
+
+    # Log to TensorBoard
+    writer = SummaryWriter(log_dir="runs/flexibility_cnn_test")
+    writer.add_scalar("Test/MAE", test_loss)
+    writer.add_scalar("Test/R2", r2)
+    writer.add_scalar("Test/Computation_Time_s_per_envelope", avg_time_per_sample)
+    writer.close()
+
+    # Save to text file if results_dir is provided
+    if results_dir is not None:
+        os.makedirs(results_dir, exist_ok=True)
+        file_path = os.path.join(results_dir, "test_set_results_metrics.txt")
+        with open(file_path, "w") as f:
+            f.write("Test Set Evaluation Metrics\n")
+            f.write("===========================\n")
+            f.write(f"Test MAE [h]: {test_loss:.5f}\n")
+            f.write(f"Test MAE [min]: {test_loss * 60.0:.2f}\n")
+            f.write(f"Test R²: {r2:.5f}\n")
+            f.write(f"Avg Computation Time [s/envelope]: {avg_time_per_sample:.5f}\n")
+        print(f"Saved test metrics to {file_path}")
+
+    return test_loss, r2, avg_time_per_sample
+
 
 def main():
     train_loader, val_loader, test_loader, means, stds = get_data()
     model = FlexibilityCNN()
-    # model = train_model(
-    #     model,
-    #     train_loader,
-    #     val_loader,
-    #     epochs=EPOCHS,
-    #     lr=LR,
-    #     wd=WEIGHT_DECAY,
-    #     device=DEVICE,
-    #     patience=PATIENCE,
-    #     save_path="best_flex_cnn.pt",
-    # )
-    #or: load a pre-trained model
-    model.load_state_dict(torch.load("best_flex_cnn.pt", map_location=DEVICE))
-    test_model(model, test_loader, device=DEVICE)
-
-    # plot_results_for_day(
-    #     model=model,
-    #     building_num=1241,
-    #     climate_id=0,
-    #     year=2020,
-    #     month=2,
-    #     day=1
-    # )
+    model = train_model(
+        model,
+        train_loader,
+        val_loader,
+        epochs=EPOCHS,
+        lr=LR,
+        wd=WEIGHT_DECAY,
+        device=DEVICE,
+        patience=PATIENCE,
+        save_path="best_flex_cnn.pt",
+    )
+    # or: load a pre-trained model
+    #model.load_state_dict(torch.load("best_flex_cnn.pt", map_location=DEVICE))
 
     # Save test predictions plots
     results_dir = os.path.join(BASE_DIR, "results")
     os.makedirs(results_dir, exist_ok=True)
     print(f"Saving test predictions to: {results_dir}")
+
+    test_model(model, test_loader, device=DEVICE, results_dir=results_dir)
 
     model.eval()
     with torch.no_grad():
