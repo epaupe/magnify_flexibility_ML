@@ -27,7 +27,7 @@ FLEX_ENV_DIR = os.path.join(BASE_DIR, "data/flex_env")
 CLIMATE_DIR = os.path.join(BASE_DIR, "input_features/climate_scenarios")
 
 BATCH_SIZE   = 16
-EPOCHS       = 50
+EPOCHS       = 10
 LR           = 1e-3
 WEIGHT_DECAY = 1e-4
 SEED         = 42
